@@ -1,0 +1,53 @@
+# GitHub Actions workflow for UDVP deployment
+# Note: This is a template. You'll need to configure Snowflake secrets in GitHub.
+
+name: Deploy UDVP to Snowflake
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install Snowflake CLI
+      run: |
+        pip install snowflake-cli-labs
+    
+    - name: Configure Snowflake Connection
+      run: |
+        mkdir -p ~/.snowflake
+        echo "${{ secrets.SNOWFLAKE_CONFIG }}" > ~/.snowflake/config
+    
+    - name: Deploy to Snowflake
+      run: |
+        bash deploy.sh
+      env:
+        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+    
+    - name: Validate Deployment
+      run: |
+        snow sql -q "SELECT * FROM UDVP_DB.UDVP_SCHEMA.PIPELINE_HEALTH;" -c cursor
+
+# To use this workflow:
+# 1. Add the following secrets to your GitHub repository:
+#    - SNOWFLAKE_CONFIG: Your .snowflake/config file contents
+#    - SNOWFLAKE_PASSWORD: Your Snowflake password or PAT
+# 2. Adjust the connection name if different from "cursor"
+# 3. Consider adding approval steps for production deployments
+

@@ -1,0 +1,27 @@
+definition_version: 2
+entities:
+  udvp_database:
+    type: database
+    identifier:
+      name: UDVP_DB
+    meta:
+      role: SYSADMIN
+
+  udvp_schema:
+    type: schema
+    identifier:
+      name: UDVP_DB.UDVP_SCHEMA
+    meta:
+      role: SYSADMIN
+
+  udvp_warehouse:
+    type: compute_pool
+    identifier:
+      name: UDVP_WH
+    warehouse_size: XSMALL
+    auto_suspend: 300
+    auto_resume: true
+    initially_suspended: false
+    meta:
+      role: SYSADMIN
+

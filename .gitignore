@@ -1,0 +1,48 @@
+# Snowflake CLI
+.snowflake/
+*.log
+deploy_output.log
+
+# Test/Sample Documents
+test_documents/
+sample_documents/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*~
+
+# Sensitive files
+*.pat
+*.key
+*.pem
+credentials.json
+secrets.yml
+

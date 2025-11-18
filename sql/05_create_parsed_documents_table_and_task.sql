@@ -1,0 +1,100 @@
+-- ============================================================================
+-- UDVP Parsed Documents Table and Task
+-- Creates table and task for parsing documents (Dynamic Tables don't support directory tables)
+-- ============================================================================
+
+USE DATABASE UDVP_DB;
+USE SCHEMA UDVP_SCHEMA;
+USE WAREHOUSE UDVP_WH;
+
+-- Create view over directory table for easy reference
+CREATE OR REPLACE VIEW STAGE_FILES AS
+SELECT 
+    RELATIVE_PATH,
+    MD5,
+    SIZE,
+    LAST_MODIFIED
+FROM DIRECTORY(@RAW_DOCUMENTS_STAGE)
+WHERE RELATIVE_PATH IS NOT NULL
+    AND SIZE > 0;
+
+-- Create regular table for parsed documents
+CREATE TABLE IF NOT EXISTS PARSED_DOCUMENTS (
+    FILE_PATH VARCHAR,
+    DOCUMENT_ID VARCHAR PRIMARY KEY,
+    FILE_SIZE_BYTES NUMBER,
+    LAST_MODIFIED TIMESTAMP_NTZ,
+    PARSED_DOCUMENT VARIANT,
+    FULL_TEXT VARCHAR,
+    CLASSIFICATION VARCHAR,
+    PROCESSED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Create task to process new documents every 5 minutes
+CREATE OR REPLACE TASK PROCESS_DOCUMENTS_TASK
+    WAREHOUSE = UDVP_WH
+    SCHEDULE = '5 MINUTE'
+    COMMENT = 'Processes documents with page_split for chunking'
+AS
+MERGE INTO PARSED_DOCUMENTS AS target
+USING (
+    SELECT 
+        RELATIVE_PATH AS FILE_PATH,
+        MD5 AS DOCUMENT_ID,
+        SIZE AS FILE_SIZE_BYTES,
+        LAST_MODIFIED::TIMESTAMP_NTZ AS LAST_MODIFIED,  -- Fix timezone mismatch
+        
+        -- Parse with page_split for chunking (no PARSE_JSON - already returns OBJECT)
+        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
+            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',  -- Full stage path
+            RELATIVE_PATH,
+            {'page_split': true}
+        ) AS PARSED_DOCUMENT,
+        
+        -- Extract full text content
+        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
+            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',
+            RELATIVE_PATH
+        ):content::VARCHAR AS FULL_TEXT,
+        
+        -- Open-ended classification using COMPLETE
+        TRY_CAST(
+            SNOWFLAKE.CORTEX.COMPLETE(
+                'mistral-large2',
+                CONCAT(
+                    'Classify this document in 1-3 words: ',
+                    SUBSTR(
+                        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
+                            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',
+                            RELATIVE_PATH
+                        ):content::VARCHAR, 
+                        1, 3000
+                    )
+                )
+            ) AS VARCHAR
+        ) AS CLASSIFICATION,
+        
+        CURRENT_TIMESTAMP() AS PROCESSED_AT
+        
+    FROM STAGE_FILES
+) AS source
+ON target.DOCUMENT_ID = source.DOCUMENT_ID
+WHEN MATCHED AND source.LAST_MODIFIED > target.LAST_MODIFIED THEN
+    UPDATE SET
+        target.FILE_PATH = source.FILE_PATH,
+        target.FILE_SIZE_BYTES = source.FILE_SIZE_BYTES,
+        target.LAST_MODIFIED = source.LAST_MODIFIED,
+        target.PARSED_DOCUMENT = source.PARSED_DOCUMENT,
+        target.FULL_TEXT = source.FULL_TEXT,
+        target.CLASSIFICATION = source.CLASSIFICATION,
+        target.PROCESSED_AT = source.PROCESSED_AT
+WHEN NOT MATCHED THEN
+    INSERT (FILE_PATH, DOCUMENT_ID, FILE_SIZE_BYTES, LAST_MODIFIED, PARSED_DOCUMENT, FULL_TEXT, CLASSIFICATION, PROCESSED_AT)
+    VALUES (source.FILE_PATH, source.DOCUMENT_ID, source.FILE_SIZE_BYTES, source.LAST_MODIFIED, source.PARSED_DOCUMENT, source.FULL_TEXT, source.CLASSIFICATION, source.PROCESSED_AT);
+
+-- Resume (start) the task
+ALTER TASK PROCESS_DOCUMENTS_TASK RESUME;
+
+SELECT 'PARSED_DOCUMENTS table and task created successfully' AS STATUS;
+SELECT 'Task will run every 5 minutes to process new documents' AS INFO;
+
