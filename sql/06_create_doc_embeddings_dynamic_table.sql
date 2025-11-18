@@ -9,9 +9,11 @@ USE WAREHOUSE UDVP_WH;
 
 -- Create the final DOC_EMBEDDINGS dynamic table
 -- This table uses page_split from AI_PARSE_DOCUMENT for automatic chunking
+-- INCREMENTAL mode required for Cortex Search Service compatibility
 CREATE OR REPLACE DYNAMIC TABLE DOC_EMBEDDINGS
     TARGET_LAG = '5 minutes'
     WAREHOUSE = UDVP_WH
+    REFRESH_MODE = INCREMENTAL
     COMMENT = 'Document embeddings for semantic search and RAG applications'
 AS
 WITH page_chunks AS (
@@ -40,8 +42,7 @@ SELECT
             TEXT_CHUNK
         ) AS VECTOR(FLOAT, 768)
     ) AS VECTOR_EMBEDDING,
-    PROCESSED_AT,
-    CURRENT_TIMESTAMP() AS EMBEDDING_GENERATED_AT
+    PROCESSED_AT
 FROM page_chunks
 WHERE TEXT_CHUNK IS NOT NULL 
     AND LENGTH(TEXT_CHUNK) > 10;

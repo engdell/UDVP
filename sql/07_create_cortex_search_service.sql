@@ -1,34 +1,71 @@
 -- ============================================================================
--- UDVP Search Capabilities
--- The pipeline provides vector similarity search via the DOC_EMBEDDINGS table
--- Note: Cortex Search Service is not compatible with Dynamic Tables
+-- UDVP Cortex Search Service
+-- Creates a Cortex Search Service for semantic search on document embeddings
 -- ============================================================================
 
 USE DATABASE UDVP_DB;
 USE SCHEMA UDVP_SCHEMA;
 USE WAREHOUSE UDVP_WH;
 
--- The DOC_EMBEDDINGS table is ready for vector similarity search
--- Use AI_EMBED to convert your search query to a vector, then use VECTOR_COSINE_SIMILARITY
+-- Create Cortex Search Service on DOC_EMBEDDINGS Dynamic Table
+-- Note: Cortex Search computes its own embeddings - don't include VECTOR_EMBEDDING column
+-- TARGET_LAG must match or exceed the source Dynamic Table's lag (5 minutes)
+CREATE OR REPLACE CORTEX SEARCH SERVICE DOCUMENT_SEARCH_SERVICE
+ON TEXT_CHUNK
+ATTRIBUTES CLASSIFICATION, FILE_PATH, CHUNK_ID
+WAREHOUSE = UDVP_WH
+TARGET_LAG = DOWNSTREAM
+AS (
+    SELECT 
+        TEXT_CHUNK,
+        CLASSIFICATION,
+        FILE_PATH,
+        CHUNK_ID
+    FROM DOC_EMBEDDINGS
+    WHERE TEXT_CHUNK IS NOT NULL
+);
 
--- Example search query (commented out - replace 'your search query' with actual text):
+-- Wait a moment for the service to initialize
+SELECT 'Cortex Search Service created successfully' AS STATUS;
+SELECT 'Service Name: DOCUMENT_SEARCH_SERVICE' AS INFO;
+
+-- Show service details
+SHOW CORTEX SEARCH SERVICES LIKE 'DOCUMENT_SEARCH_SERVICE';
+
+-- Example 1: Simple text search
 /*
-WITH search_vector AS (
-    SELECT AI_EMBED('e5-base-v2', 'your search query here') AS query_embedding
-)
-SELECT 
-    d.FILE_PATH,
-    d.CLASSIFICATION,
-    d.TEXT_CHUNK,
-    d.CHUNK_ID,
-    VECTOR_COSINE_SIMILARITY(d.VECTOR_EMBEDDING, s.query_embedding) AS SIMILARITY_SCORE
-FROM DOC_EMBEDDINGS d
-CROSS JOIN search_vector s
-WHERE d.VECTOR_EMBEDDING IS NOT NULL
-ORDER BY SIMILARITY_SCORE DESC
-LIMIT 10;
+SELECT * FROM TABLE(
+    DOCUMENT_SEARCH_SERVICE!SEARCH(
+        QUERY => 'payment terms and invoicing',
+        LIMIT => 10
+    )
+);
 */
 
-SELECT 'Search capabilities are ready via DOC_EMBEDDINGS table' AS STATUS;
-SELECT 'Use vector similarity search with AI_EMBED for semantic search' AS USAGE_INFO;
+-- Example 2: Search with filters
+/*
+SELECT * FROM TABLE(
+    DOCUMENT_SEARCH_SERVICE!SEARCH(
+        QUERY => 'termination clause',
+        FILTER => {'@eq': {'CLASSIFICATION': 'Service Agreement'}},
+        LIMIT => 10
+    )
+);
+*/
+
+-- Example 3: Get columns with results
+/*
+SELECT 
+    TEXT_CHUNK,
+    CLASSIFICATION,
+    FILE_PATH,
+    CHUNK_ID
+FROM TABLE(
+    DOCUMENT_SEARCH_SERVICE!SEARCH(
+        QUERY => 'contract renewal conditions',
+        COLUMNS => ['TEXT_CHUNK', 'CLASSIFICATION', 'FILE_PATH', 'CHUNK_ID'],
+        LIMIT => 10
+    )
+);
+*/
 
