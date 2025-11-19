@@ -34,49 +34,50 @@ CREATE TABLE IF NOT EXISTS PARSED_DOCUMENTS (
 CREATE OR REPLACE TASK PROCESS_DOCUMENTS_TASK
     WAREHOUSE = UDVP_WH
     SCHEDULE = '5 MINUTE'
-    COMMENT = 'Processes documents with page_split for chunking'
+    COMMENT = 'Processes documents with AI_PARSE_DOCUMENT page_split for chunking'
 AS
 MERGE INTO PARSED_DOCUMENTS AS target
 USING (
     SELECT 
-        RELATIVE_PATH AS FILE_PATH,
-        MD5 AS DOCUMENT_ID,
-        SIZE AS FILE_SIZE_BYTES,
-        LAST_MODIFIED::TIMESTAMP_NTZ AS LAST_MODIFIED,  -- Fix timezone mismatch
-        
-        -- Parse with page_split for chunking (no PARSE_JSON - already returns OBJECT)
-        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
-            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',  -- Full stage path
-            RELATIVE_PATH,
-            {'page_split': true}
-        ) AS PARSED_DOCUMENT,
-        
-        -- Extract full text content
-        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
-            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',
-            RELATIVE_PATH
-        ):content::VARCHAR AS FULL_TEXT,
-        
-        -- Open-ended classification using COMPLETE
-        TRY_CAST(
-            SNOWFLAKE.CORTEX.COMPLETE(
-                'mistral-large2',
-                CONCAT(
-                    'Classify this document in 1-3 words: ',
-                    SUBSTR(
-                        SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
-                            '@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE',
-                            RELATIVE_PATH
-                        ):content::VARCHAR, 
-                        1, 3000
-                    )
-                )
-            ) AS VARCHAR
+        FILE_PATH,
+        DOCUMENT_ID,
+        FILE_SIZE_BYTES,
+        LAST_MODIFIED,
+        PARSED_PAGES AS PARSED_DOCUMENT,
+        FULL_CONTENT AS FULL_TEXT,
+        AI_COMPLETE(
+            'mistral-large2',
+            CONCAT(
+                'Classify this document in 1-3 words: ',
+                SUBSTR(FULL_CONTENT, 1, 3000)
+            ),
+            OBJECT_CONSTRUCT('max_tokens', 20, 'temperature', 0.1)
         ) AS CLASSIFICATION,
-        
         CURRENT_TIMESTAMP() AS PROCESSED_AT
-        
-    FROM STAGE_FILES
+    FROM (
+        SELECT 
+            FILE_PATH,
+            DOCUMENT_ID,
+            FILE_SIZE_BYTES,
+            LAST_MODIFIED,
+            AI_PARSE_DOCUMENT(
+                FILE_REFERENCE,
+                OBJECT_CONSTRUCT('mode', 'LAYOUT', 'page_split', true)
+            ) AS PARSED_PAGES,
+            AI_PARSE_DOCUMENT(
+                FILE_REFERENCE,
+                OBJECT_CONSTRUCT('mode', 'LAYOUT')
+            ):content::VARCHAR AS FULL_CONTENT
+        FROM (
+            SELECT 
+                RELATIVE_PATH AS FILE_PATH,
+                MD5 AS DOCUMENT_ID,
+                SIZE AS FILE_SIZE_BYTES,
+                LAST_MODIFIED::TIMESTAMP_NTZ AS LAST_MODIFIED,
+                TO_FILE('@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE', RELATIVE_PATH) AS FILE_REFERENCE
+            FROM STAGE_FILES
+        )
+    )
 ) AS source
 ON target.DOCUMENT_ID = source.DOCUMENT_ID
 WHEN MATCHED AND source.LAST_MODIFIED > target.LAST_MODIFIED THEN
