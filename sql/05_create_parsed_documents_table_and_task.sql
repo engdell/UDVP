@@ -33,10 +33,9 @@ CREATE TABLE IF NOT EXISTS PARSED_DOCUMENTS (
 -- Create task to process new documents every 5 minutes
 CREATE OR REPLACE TASK PROCESS_DOCUMENTS_TASK
     WAREHOUSE = UDVP_WH
-    SCHEDULE = '5 MINUTE'
-    COMMENT = 'Processes documents with AI_PARSE_DOCUMENT page_split for chunking'
     WHEN SYSTEM$STREAM_HAS_DATA('DOCUMENTS_STREAM')
 AS
+/* Processes documents with AI_PARSE_DOCUMENT page_split for chunking */
 MERGE INTO PARSED_DOCUMENTS AS target
 USING (
     SELECT 
@@ -45,12 +44,12 @@ USING (
         FILE_SIZE_BYTES,
         LAST_MODIFIED,
         PARSED_PAGES AS PARSED_DOCUMENT,
-        FULL_CONTENT AS FULL_TEXT,
+        DOCUMENT_SUMMARY AS FULL_TEXT,
         AI_COMPLETE(
             'mistral-large2',
             CONCAT(
                 'Classify this document in 1-3 words: ',
-                SUBSTR(FULL_CONTENT, 1, 3000)
+                SUBSTR(DOC_TEXT_SNIPPET, 1, 3000)
             ),
             OBJECT_CONSTRUCT('max_tokens', 20, 'temperature', 0.1)
         ) AS CLASSIFICATION,
@@ -61,22 +60,49 @@ USING (
             DOCUMENT_ID,
             FILE_SIZE_BYTES,
             LAST_MODIFIED,
-            AI_PARSE_DOCUMENT(
-                FILE_REFERENCE,
-                OBJECT_CONSTRUCT('mode', 'LAYOUT', 'page_split', true)
-            ) AS PARSED_PAGES,
-            AI_PARSE_DOCUMENT(
-                FILE_REFERENCE,
-                OBJECT_CONSTRUCT('mode', 'LAYOUT')
-            ):content::VARCHAR AS FULL_CONTENT
+            PARSED_PAGES,
+            DOC_TEXT_SNIPPET,
+            AI_COMPLETE(
+                'mistral-large2',
+                CONCAT(
+                    'Provide a concise 4 sentence summary highlighting document type, purpose, key clauses, and any monetary amounts. Document text: ',
+                    SUBSTR(DOC_TEXT_SNIPPET, 1, 4000)
+                ),
+                OBJECT_CONSTRUCT('max_tokens', 120, 'temperature', 0.2)
+            ) AS DOCUMENT_SUMMARY
         FROM (
             SELECT 
-                FILE_PATH,
-                MD5 AS DOCUMENT_ID,
-                FILE_SIZE_BYTES,
-                LAST_MODIFIED,
-                TO_FILE('@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE', FILE_PATH) AS FILE_REFERENCE
-            FROM STAGE_FILES
+                parsed.FILE_PATH,
+                parsed.DOCUMENT_ID,
+                parsed.FILE_SIZE_BYTES,
+                parsed.LAST_MODIFIED,
+                parsed.PARSED_PAGES,
+                COALESCE(text_snippet.DOC_TEXT_SNIPPET, '') AS DOC_TEXT_SNIPPET
+            FROM (
+                SELECT 
+                    FILE_PATH,
+                    MD5 AS DOCUMENT_ID,
+                    FILE_SIZE_BYTES,
+                    LAST_MODIFIED,
+                    AI_PARSE_DOCUMENT(
+                        FILE_REFERENCE,
+                        OBJECT_CONSTRUCT('mode', 'LAYOUT', 'page_split', true)
+                    ) AS PARSED_PAGES
+                FROM (
+                    SELECT 
+                        FILE_PATH,
+                        MD5,
+                        FILE_SIZE_BYTES,
+                        LAST_MODIFIED,
+                        TO_FILE('@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE', FILE_PATH) AS FILE_REFERENCE
+                    FROM STAGE_FILES
+                )
+            ) parsed,
+            LATERAL (
+                SELECT 
+                    LISTAGG(page.value:content::string, '\n\n') WITHIN GROUP (ORDER BY page.index) AS DOC_TEXT_SNIPPET
+                FROM LATERAL FLATTEN(input => parsed.PARSED_PAGES:pages) page
+            ) text_snippet
         )
     )
 ) AS source
