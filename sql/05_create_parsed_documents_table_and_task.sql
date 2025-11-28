@@ -38,24 +38,59 @@ AS
 /* Processes documents with AI_PARSE_DOCUMENT page_split for chunking */
 MERGE INTO PARSED_DOCUMENTS AS target
 USING (
-    SELECT 
-        FILE_PATH,
-        DOCUMENT_ID,
-        FILE_SIZE_BYTES,
-        LAST_MODIFIED,
-        PARSED_PAGES AS PARSED_DOCUMENT,
-        DOCUMENT_SUMMARY AS FULL_TEXT,
-        AI_COMPLETE(
-            'mistral-large2',
-            CONCAT(
-                'Classify this document in 1-3 words: ',
-                SUBSTR(DOC_TEXT_SNIPPET, 1, 3000)
-            ),
-            OBJECT_CONSTRUCT('max_tokens', 20, 'temperature', 0.1)
-        ) AS CLASSIFICATION,
-        CURRENT_TIMESTAMP() AS PROCESSED_AT
-    FROM (
+    WITH stage_file_refs AS (
         SELECT 
+            FILE_PATH,
+            MD5,
+            FILE_SIZE_BYTES,
+            LAST_MODIFIED,
+            TO_FILE('@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE', FILE_PATH) AS FILE_REFERENCE
+        FROM STAGE_FILES
+    ),
+    parsed_documents AS (
+        SELECT 
+            FILE_PATH,
+            MD5 AS DOCUMENT_ID,
+            FILE_SIZE_BYTES,
+            LAST_MODIFIED,
+            AI_PARSE_DOCUMENT(
+                FILE_REFERENCE,
+                OBJECT_CONSTRUCT('mode', 'LAYOUT', 'page_split', true)
+            ) AS PARSED_PAGES
+        FROM stage_file_refs
+    ),
+    flattened_pages AS (
+        SELECT
+            p.FILE_PATH,
+            p.DOCUMENT_ID,
+            page.index AS PAGE_INDEX,
+            page.value:content::string AS PAGE_TEXT
+        FROM parsed_documents p,
+            LATERAL FLATTEN(input => p.PARSED_PAGES:pages) page
+    ),
+    doc_text_snippets AS (
+        SELECT
+            FILE_PATH,
+            DOCUMENT_ID,
+            LISTAGG(PAGE_TEXT, '\n\n') WITHIN GROUP (ORDER BY PAGE_INDEX) AS DOC_TEXT_SNIPPET
+        FROM flattened_pages
+        GROUP BY FILE_PATH, DOCUMENT_ID
+    ),
+    documents_with_text AS (
+        SELECT
+            p.FILE_PATH,
+            p.DOCUMENT_ID,
+            p.FILE_SIZE_BYTES,
+            p.LAST_MODIFIED,
+            p.PARSED_PAGES,
+            COALESCE(t.DOC_TEXT_SNIPPET, '') AS DOC_TEXT_SNIPPET
+        FROM parsed_documents p
+        LEFT JOIN doc_text_snippets t
+            ON p.FILE_PATH = t.FILE_PATH
+            AND p.DOCUMENT_ID = t.DOCUMENT_ID
+    ),
+    documents_with_summary AS (
+        SELECT
             FILE_PATH,
             DOCUMENT_ID,
             FILE_SIZE_BYTES,
@@ -70,41 +105,28 @@ USING (
                 ),
                 OBJECT_CONSTRUCT('max_tokens', 120, 'temperature', 0.2)
             ) AS DOCUMENT_SUMMARY
-        FROM (
-            SELECT 
-                parsed.FILE_PATH,
-                parsed.DOCUMENT_ID,
-                parsed.FILE_SIZE_BYTES,
-                parsed.LAST_MODIFIED,
-                parsed.PARSED_PAGES,
-                COALESCE(text_snippet.DOC_TEXT_SNIPPET, '') AS DOC_TEXT_SNIPPET
-            FROM (
-                SELECT 
-                    FILE_PATH,
-                    MD5 AS DOCUMENT_ID,
-                    FILE_SIZE_BYTES,
-                    LAST_MODIFIED,
-                    AI_PARSE_DOCUMENT(
-                        FILE_REFERENCE,
-                        OBJECT_CONSTRUCT('mode', 'LAYOUT', 'page_split', true)
-                    ) AS PARSED_PAGES
-                FROM (
-                    SELECT 
-                        FILE_PATH,
-                        MD5,
-                        FILE_SIZE_BYTES,
-                        LAST_MODIFIED,
-                        TO_FILE('@UDVP_DB.UDVP_SCHEMA.RAW_DOCUMENTS_STAGE', FILE_PATH) AS FILE_REFERENCE
-                    FROM STAGE_FILES
-                )
-            ) parsed,
-            LATERAL (
-                SELECT 
-                    LISTAGG(page.value:content::string, '\n\n') WITHIN GROUP (ORDER BY page.index) AS DOC_TEXT_SNIPPET
-                FROM LATERAL FLATTEN(input => parsed.PARSED_PAGES:pages) page
-            ) text_snippet
-        )
+        FROM documents_with_text
+    ),
+    documents_enriched AS (
+        SELECT
+            FILE_PATH,
+            DOCUMENT_ID,
+            FILE_SIZE_BYTES,
+            LAST_MODIFIED,
+            PARSED_PAGES AS PARSED_DOCUMENT,
+            DOCUMENT_SUMMARY AS FULL_TEXT,
+            AI_COMPLETE(
+                'mistral-large2',
+                CONCAT(
+                    'Classify this document in 1-3 words: ',
+                    SUBSTR(DOC_TEXT_SNIPPET, 1, 3000)
+                ),
+                OBJECT_CONSTRUCT('max_tokens', 20, 'temperature', 0.1)
+            ) AS CLASSIFICATION,
+            CURRENT_TIMESTAMP() AS PROCESSED_AT
+        FROM documents_with_summary
     )
+    SELECT * FROM documents_enriched
 ) AS source
 ON target.DOCUMENT_ID = source.DOCUMENT_ID
 WHEN MATCHED AND source.LAST_MODIFIED > target.LAST_MODIFIED THEN
