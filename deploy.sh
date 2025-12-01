@@ -44,7 +44,6 @@ SQL_FILES=(
     "sql/05_create_parsed_documents_table_and_task.sql"
     "sql/06_create_doc_embeddings_dynamic_table.sql"
     "sql/07_create_cortex_search_service.sql"
-    "sql/11_refresh_cortex_search_task.sql"
     "sql/08_monitoring_and_observability.sql"
 )
 
